@@ -1,8 +1,0 @@
-[
-{
-  "directory": "/home/wang/sources/cxx/__template__/build",
-  "command": "/usr/local/bin/g++ -I/home/wang/sources/cxx/__template__/include -I/home/wang/sources/cxx/__template__/build -I/home/wang/sources/cxx/__template__/source -isystem /home/wang/git-repositories/vcpkg/installed/x64-linux-clang-libcxx/include -O3 -DNDEBUG -std=c++26 -Wall -Wextra -pedantic -Werror -O3 -march=native -stdlib=libc++ -fmodules-ts -fmodule-mapper=CMakeFiles/__lru.dir/source/main.cxx.o.modmap -MD -fdeps-format=p1689r5 -x c++ -o CMakeFiles/__lru.dir/source/main.cxx.o -c /home/wang/sources/cxx/__template__/source/main.cxx",
-  "file": "/home/wang/sources/cxx/__template__/source/main.cxx",
-  "output": "CMakeFiles/__lru.dir/source/main.cxx.o"
-}
-]

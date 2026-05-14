@@ -1,4 +1,0 @@
-/home/wang/sources/cxx/__template__/build/CMakeFiles/__lru.dir
-/home/wang/sources/cxx/__template__/build/CMakeFiles/test.dir
-/home/wang/sources/cxx/__template__/build/CMakeFiles/edit_cache.dir
-/home/wang/sources/cxx/__template__/build/CMakeFiles/rebuild_cache.dir

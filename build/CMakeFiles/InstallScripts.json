@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/wang/sources/cxx/__template__/build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
