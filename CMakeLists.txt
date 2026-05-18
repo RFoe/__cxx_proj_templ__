@@ -4,19 +4,14 @@ cmake_policy (SET CMP0155 NEW)
 set (PROJECT_DESCRIPTION "__lru__" CACHE STRING "project description")
 set_property (GLOBAL PROPERTY USE_FOLDERS ON)
 
-set (CMAKE_BUILD_TYPE Release CACHE STRING "build type" FORCE)
-
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set (CMAKE_EXE_LINKER_FLAGS_DEBUG
-         "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=address,undefined"
-    )
-    # "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=thread"
-endif ()
+set (CMAKE_BUILD_TYPE Debug CACHE STRING "build type" FORCE)
 
 # set (VCPKG_TARGET_TRIPLET x64-linux CACHE STRING "VCPKG target triplet" FORCE)
 set (VCPKG_TARGET_TRIPLET x64-linux-clang-libcxx
      CACHE STRING "VCPKG target triplet" FORCE
 )
+
+set(__SAN__ -fsanitize=thread,undefined)
 
 project (__lru VERSION 0.1.0 LANGUAGES CXX C DESCRIPTION ${PROJECT_DESCRIPTION})
 
@@ -36,11 +31,8 @@ if (CCACHE_FOUND)
     set (CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_FOUND})
 endif ()
 
-find_package (Boost REQUIRED COMPONENTS unordered intrusive)
 find_package (Catch2 CONFIG REQUIRED)
 find_package (benchmark CONFIG REQUIRED)
-
-# if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU") find_package (TBB REQUIRED) endif ()
 
 file (
     GLOB_RECURSE
@@ -77,15 +69,10 @@ target_include_directories (
     ${PROJECT_NAME}
     PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+            $<BUILD_INTERFACE:$ENV{HOME}/git-repositories/stdexec/include>
             $<INSTALL_INTERFACE:include> source ${PROJECT_INCLUDE_DIRS}
 )
-target_link_libraries (
-    ${PROJECT_NAME} PRIVATE Boost::unordered Boost::intrusive
-)
 
-# if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU") target_link_libraries
-# (${PROJECT_NAME} PRIVATE TBB::tbb) target_link_options ( ${PROJECT_NAME}
-# PRIVATE -static-libstdc++ -static-libgcc ) endif ()
 
 target_compile_options (
     ${PROJECT_NAME}
@@ -97,14 +84,17 @@ target_compile_options (
             /WX>
             $<$<CONFIG:Debug>:-g
             -fno-omit-frame-pointer
-            -fsanitize=address,undefined
-            # -fsanitize=thread
+            ${__SAN__}
             >
             $<$<CONFIG:Release>:-O3
             -march=native>
             -stdlib=libc++
 )
-target_link_options (${PROJECT_NAME} PRIVATE -stdlib=libc++ -lc++ -lc++abi)
+target_link_options (
+    ${PROJECT_NAME} PRIVATE     
+    $<$<CONFIG:Debug>:${__SAN__}> 
+    -stdlib=libc++ -lc++ -lc++abi
+)
 
 if (__TEST_SOURCES__)
     set (__SOURCES_MAIN_EXCLUDED__ ${__SOURCES__})
@@ -115,16 +105,13 @@ if (__TEST_SOURCES__)
     target_include_directories (
         test_${PROJECT_NAME}
         PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-                $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-                $<INSTALL_INTERFACE:include> source ${PROJECT_INCLUDE_DIRS}
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+            $<BUILD_INTERFACE:$ENV{HOME}/git-repositories/stdexec/include>
+            $<INSTALL_INTERFACE:include> source ${PROJECT_INCLUDE_DIRS}
     )
     target_link_libraries (
         test_${PROJECT_NAME} PRIVATE Catch2::Catch2 Catch2::Catch2WithMain
     )
-
-    # if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU") target_link_libraries
-    # (test_${PROJECT_NAME} PRIVATE TBB::tbb) target_link_options (
-    # test_${PROJECT_NAME} PRIVATE -static-libstdc++ -static-libgcc ) endif ()
 
     target_compile_options (
         test_${PROJECT_NAME}
@@ -137,15 +124,16 @@ if (__TEST_SOURCES__)
                 /WX>
                 $<$<CONFIG:Debug>:-g
                 -fno-omit-frame-pointer
-                -fsanitize=address,undefined
-                # -fsanitize=thread
+                ${__SAN__}
                 >
                 $<$<CONFIG:Release>:-O3
                 -march=native>
                 -stdlib=libc++
     )
     target_link_options (
-        test_${PROJECT_NAME} PRIVATE -stdlib=libc++ -lc++ -lc++abi
+        test_${PROJECT_NAME} PRIVATE    
+        $<$<CONFIG:Debug>:${__SAN__}> 
+        -stdlib=libc++ -lc++ -lc++abi
     )
     add_test (NAME TEST_${PROJECT_NAME} COMMAND test_${PROJECT_NAME})
     set_tests_properties (TEST_${PROJECT_NAME} PROPERTIES FAIL_ON_STDOUT true)
@@ -161,13 +149,11 @@ if (__BENCHMARK_SOURCES__)
     target_include_directories (
         benchmark_${PROJECT_NAME}
         PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-                $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-                $<INSTALL_INTERFACE:include> source ${PROJECT_INCLUDE_DIRS}
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+            $<BUILD_INTERFACE:$ENV{HOME}/git-repositories/stdexec/include>
+            $<INSTALL_INTERFACE:include> source ${PROJECT_INCLUDE_DIRS}
     )
-    # if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU") target_link_libraries
-    # (benchmark_${PROJECT_NAME} PRIVATE TBB::tbb) target_link_options (
-    # benchmark_${PROJECT_NAME} PRIVATE -static-libstdc++ -static-libgcc ) endif
-    # ()
+    
     target_link_libraries (
         benchmark_${PROJECT_NAME} PRIVATE benchmark::benchmark
                                           benchmark::benchmark_main
@@ -182,15 +168,16 @@ if (__BENCHMARK_SOURCES__)
                 /WX>
                 $<$<CONFIG:Debug>:-g
                 -fno-omit-frame-pointer
-                -fsanitize=address,undefined
-                # -fsanitize=thread
+                ${__SAN__}
                 >
                 $<$<CONFIG:Release>:-O3
                 -march=native>
                 -stdlib=libc++
     )
     target_link_options (
-        benchmark_${PROJECT_NAME} PRIVATE -stdlib=libc++ -lc++ -lc++abi
+        benchmark_${PROJECT_NAME} PRIVATE     
+        $<$<CONFIG:Debug>:${__SAN__}> 
+        -stdlib=libc++ -lc++ -lc++abi
     )
     add_test (NAME BENCHMARK_${PROJECT_NAME} COMMAND benchmark_${PROJECT_NAME})
     set_tests_properties (

@@ -1,0 +1,8 @@
+todo: 
+
+    __remote_queue_pool太慢了
+    我希望有一个数据结构: 
+        Map: tid[remote_queue]
+        支持get
+        参考__rcu::__core::__descriptor::__env(folly::rcu)
+        
