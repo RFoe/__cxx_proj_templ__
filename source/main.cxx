@@ -1,11 +1,11 @@
-#include <__pool/__v3/__park/__parschd.hpp>
+#include <__gr/__v3/__resumable/__parschd.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <print>
 #include <thread>
 
-using namespace __pool::_park_; // NOLINT
+using namespace __gr::__resumable__; // NOLINT
 
 namespace {
 
@@ -41,7 +41,7 @@ auto main() -> int {
         __remaining.store(__count, std::memory_order_relaxed);
         for (unsigned __i{}; __i < __count; ++__i) {
             __schd._M_enqueue(_S_task([&__remaining]() noexcept -> void {
-                // std::this_thread::sleep_for(1s);
+                std::this_thread::sleep_for(1s);
                 if (__remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
                     __remaining.notify_all();
                 }
@@ -55,12 +55,6 @@ auto main() -> int {
         }
     };
 
-    // ---- 等可调度线程数稳定 ------------------------------------------
-    // __size_ 是可见集大小,正好等于当前能接活的线程数:
-    // retire 把自己移出可见集(size--),resume 重新加入(size++)。
-    // _M_request_retire/resume 是异步信号,enqueue 前必须等 __size_
-    // 收敛到位,否则任务会落到尚未真正 retire 的线程上,计时失真。
-    // __size_ 上没有 notify,只能轮询(测试夹具,可接受)。
     auto __wait_size = [&](std::uint32_t __want) noexcept -> void {
         while (__schd.__size_.load(std::memory_order_acquire) < __want) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -80,26 +74,27 @@ auto main() -> int {
     };
 
     for (std::size_t __i{}; __i < __n; ++__i) {
-        __schd.__state_[__i]->_M_request_retire();
+        __schd.__receiver_[__i]->_M_notify_retire_sync();
     }
+    std::println("all retired");
     std::size_t __i{};
     for (std::size_t __j{}; __j < __share; ++__j) {
-        __schd.__state_[__i + __j]->_M_request_resume();
+        __schd.__receiver_[__i + __j]->_M_notify_resume_sync();
     }
     __i += __share;
     __phase("phase 1", __i); // 16 tasks / 1 thread  -> ~16.00s
     for (std::size_t __j{}; __j < __share; ++__j) {
-        __schd.__state_[__i + __j]->_M_request_resume();
+        __schd.__receiver_[__i + __j]->_M_notify_resume_sync();
     }
     __i += __share;
     __phase("phase 2", __i); // 16 / 2               -> ~ 8.00s
     for (std::size_t __j{}; __j < __share; ++__j) {
-        __schd.__state_[__i + __j]->_M_request_resume();
+        __schd.__receiver_[__i + __j]->_M_notify_resume_sync();
     }
     __i += __share;
     __phase("phase 3", __i); // ceil(16/3) waves     -> ~ 6.00s
     for (std::size_t __j{}; __j < __share; ++__j) {
-        __schd.__state_[__i + __j]->_M_request_resume();
+        __schd.__receiver_[__i + __j]->_M_notify_resume_sync();
     }
     __i += __share;
     __phase("phase 4", __i); // 16 / 4               -> ~ 4.00s
