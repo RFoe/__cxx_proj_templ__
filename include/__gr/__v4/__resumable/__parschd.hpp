@@ -6,6 +6,8 @@
 #include <stdexec/__detail/__manual_lifetime.hpp>
 #include <stdexec/__detail/__utility.hpp>
 
+#include <__gr/__core/__atomic_seg_array.hpp>
+
 #include <linux/futex.h>
 #include <linux/membarrier.h>
 #include <mutex>
@@ -37,7 +39,7 @@ void __tsan_release(void *__addr);
     #define _Gr_max_n_concurrency 512
 #endif
 
-namespace __gr::__resumable__::inline __v3 {
+namespace __gr::__resumable__::inline __v4 {
 
 template <std::default_initializable _Ty, std::size_t _Np> struct __vector {
     _Ty         __data_[_Np];
@@ -81,60 +83,54 @@ struct __task_base {
 };
 
 struct __remote_queue {
-    explicit __remote_queue() noexcept = default;
-    explicit __remote_queue(__remote_queue *__next) noexcept
-        : __next_(__next) {}
-
-    exec::__atomic_intrusive_queue<&__task_base::__next_>
-                          __queues_[_Gr_max_n_concurrency]{};
-    __remote_queue       *__next_ = nullptr;
-    const std::thread::id __id_   = std::this_thread::get_id();
-    std::uint32_t __index_        = (std::numeric_limits<std::uint32_t>::max)();
+    explicit __remote_queue(const unsigned __n) noexcept : __queues_(__n) {}
+    std::vector<exec::__atomic_intrusive_queue<&__task_base::__next_>>
+                          __queues_;
+    const std::thread::id __id_ = std::this_thread::get_id();
+    std::uint32_t __index_      = (std::numeric_limits<std::uint32_t>::max)();
     alignas(__GCC_DESTRUCTIVE_SIZE) std::atomic<std::uint64_t> __rcu_seq_{0U};
 };
 
 struct __remote_queue_sink { // NOLINT
-    std::atomic<__remote_queue *> __head_;
-    __remote_queue               *__tail_;
-    __remote_queue                __this_{};
-
-    explicit __remote_queue_sink() noexcept
-        : __head_{&__this_}, __tail_{&__this_} {}
-
+    __core__::__atomic_seg_array<__remote_queue *, _Gr_max_n_concurrency>
+        __queue_;
     ~__remote_queue_sink() noexcept {
-        __remote_queue *__head = __head_.load(std::memory_order_acquire);
-        while (__head != __tail_) {
-            __remote_queue *tmp = std::exchange(__head, __head->__next_);
-            delete tmp;
-        }
+        __queue_._M_ro_iter(
+            [] [[__gnu__::__always_inline__]] (__remote_queue * __p) //
+            noexcept -> bool {
+                delete __p;
+                return false;
+            });
     }
-
-    [[__nodiscard__]] auto _M_pop_all_reversed(std::size_t __tid) noexcept
+    [[__nodiscard__]] auto
+    _M_pop_all_reversed(const std::size_t __tid) const noexcept
         -> STDEXEC::__intrusive_queue<&__task_base::__next_> {
-        __remote_queue *__head = __head_.load(std::memory_order_acquire);
         STDEXEC::__intrusive_queue<&__task_base::__next_> __task{};
-        while (__head != nullptr) {
-            // NOLINTNEXTLINE
-            __task.append(__head->__queues_[__tid].pop_all_reversed());
-            __head = __head->__next_;
-        }
+        __queue_._M_ro_iter(
+            [&__task, __tid]                                      //
+            [[__gnu__::__always_inline__]] (__remote_queue * __p) //
+            noexcept -> bool {
+                __task.append(__p->__queues_[__tid].pop_all_reversed());
+                return false;
+            });
         return __task;
     }
 
-    [[__nodiscard__]] auto _M_get() -> __remote_queue * {
-        thread_local std::thread::id _S_tid = std::this_thread::get_id();
-        __remote_queue *__head  = __head_.load(std::memory_order_acquire);
-        __remote_queue *__queue = __head;
-        while (__queue != __tail_) {
-            if (__queue->__id_ == _S_tid) { return __queue; }
-            __queue = __queue->__next_;
-        }
-        auto *__new_head = new __remote_queue{__head};
-        while (!__head_.compare_exchange_weak(
-            __head, __new_head, std::memory_order_acq_rel)) {
-            __new_head->__next_ = __head;
-        }
-        return __new_head;
+    [[__nodiscard__]] auto _M_get(const std::uint32_t __n) noexcept
+        -> __remote_queue * {
+        thread_local std::thread::id _S_tid   = std::this_thread::get_id();
+        __remote_queue              *__needle = nullptr;
+        __queue_._M_ro_iter([&__needle](__remote_queue *__p) noexcept -> bool {
+            if (__p->__id_ == _S_tid) [[__unlikely__]] {
+                __needle = __p;
+                return true;
+            }
+            return false;
+        });
+        if (__needle != nullptr) { return __needle; }
+        auto *__result = ::new (std::nothrow) __remote_queue{__n};
+        __queue_._M_push_back(__result);
+        return __result;
     }
 };
 
@@ -160,14 +156,6 @@ struct __task_receiver {
         _S_resume,
         _S_stop
     };
-    [[__nodiscard__]] static constexpr auto
-    _S_exec_stage_name(const __exec_stage __stage) noexcept -> char const * {
-        switch (__stage) {
-        case __exec_stage::_S_run:     return "_S_run";
-        case __exec_stage::_S_sleep:   return "_S_sleep";
-        case __exec_stage::_S_suspend: return "_S_suspend";
-        }
-    }
 
     struct __state_mask {
 #if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
@@ -386,7 +374,7 @@ struct __parschd { // NOLINT
         if (__nid_ < __vec.__size_) [[__likely__]] {
             return __vec.__data_[__nid_]; // NOLINT
         }
-        return __vec._M_resize_emplace(__nid_, __remote_._M_get());
+        return __vec._M_resize_emplace(__nid_, __remote_._M_get(__n_thread_));
     }
 
     void _M_rcu_lock(__remote_queue &__rq) noexcept {
@@ -405,17 +393,23 @@ struct __parschd { // NOLINT
         }
     }
     [[__nodiscard__]] auto
-    _M_rcu_can_progress(const std::uint64_t __ep) noexcept -> bool {
+    _M_rcu_can_progress(const std::uint64_t __ep) const noexcept -> bool {
         _S_syscall_memory_barrier(MEMBARRIER_CMD_GLOBAL);
-        for (__remote_queue *__head =
-                 __remote_.__head_.load(std::memory_order_acquire);
-             __head != nullptr; __head = __head->__next_) {
-            _TSAN_ACQUIRE(&__head->__rcu_seq_);
-            const auto __tmp =
-                __head->__rcu_seq_.load(std::memory_order_relaxed);
-            if (__tmp != 0 && __tmp < __ep) { return false; }
-        }
-        return true;
+        bool __ok = true;
+        __remote_.__queue_._M_ro_iter(
+            [__ep, &__ok]                                         //
+            [[__gnu__::__always_inline__]] (__remote_queue * __p) //
+            noexcept -> bool {
+                _TSAN_ACQUIRE(&__p->__rcu_seq_);
+                const auto __tmp =
+                    __p->__rcu_seq_.load(std::memory_order_relaxed);
+                if (__tmp != 0 && __tmp < __ep) {
+                    __ok = false;
+                    return true;
+                }
+                return false;
+            });
+        return __ok;
     }
     void _M_rcu_synchronize() noexcept {
         const std::uint64_t __ep =
@@ -731,4 +725,4 @@ inline void __task_receiver::_M_retire_and_resume() noexcept {
     }
     _M_consume(__message::_S_resume);
 }
-} // namespace __gr::__resumable__::inline __v3
+} // namespace __gr::__resumable__::inline __v4

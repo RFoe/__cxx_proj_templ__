@@ -1,7 +1,8 @@
-#include <__gr/__v3/__resumable/__parschd.hpp>
+#include <__gr/__v4/__resumable/__parschd.hpp>
 
 #include <atomic>
 #include <chrono>
+#include <latch>
 #include <print>
 #include <thread>
 
@@ -42,6 +43,7 @@ auto main() -> int {
         for (unsigned __i{}; __i < __count; ++__i) {
             __schd._M_enqueue(_S_task([&__remaining]() noexcept -> void {
                 std::this_thread::sleep_for(1s);
+                std::println("{}", std::this_thread::get_id());
                 if (__remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
                     __remaining.notify_all();
                 }
@@ -55,14 +57,14 @@ auto main() -> int {
         }
     };
 
-    auto __wait_size = [&](std::uint32_t __want) noexcept -> void {
-        while (__schd.__size_.load(std::memory_order_acquire) < __want) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    };
+    // auto __wait_size = [&](std::uint32_t __want) noexcept -> void {
+    //     while (__schd.__size_.load(std::memory_order_acquire) < __want) {
+    //         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    //     }
+    // };
 
     auto __phase = [&](const char *__name, std::uint32_t __threads) -> void {
-        __wait_size(__threads);
+        // __wait_size(__threads);
         std::println(
             "--- {}: {} thread(s), {} tasks @1s ---", __name, __threads, __n);
         const auto __t0 = __clock::now();
@@ -72,30 +74,42 @@ auto main() -> int {
             std::chrono::duration<double>(__clock::now() - __t0).count();
         std::println("--- {} done in {:.4f}s ---\n", __name, __dt);
     };
-
+    std::println("start retired");
     for (std::size_t __i{}; __i < __n; ++__i) {
         __schd.__receiver_[__i]->_M_notify_retire_sync();
     }
     std::println("all retired");
     std::size_t __i{};
+    std::println("restart resume");
     for (std::size_t __j{}; __j < __share; ++__j) {
         __schd.__receiver_[__i + __j]->_M_notify_resume_sync();
     }
+    std::println(
+        "all resumed  {}", __schd.__size_.load(std::memory_order_relaxed));
     __i += __share;
     __phase("phase 1", __i); // 16 tasks / 1 thread  -> ~16.00s
+    std::println("restart resume");
     for (std::size_t __j{}; __j < __share; ++__j) {
         __schd.__receiver_[__i + __j]->_M_notify_resume_sync();
     }
+    std::println(
+        "all resumed {}", __schd.__size_.load(std::memory_order_relaxed));
     __i += __share;
     __phase("phase 2", __i); // 16 / 2               -> ~ 8.00s
+    std::println("restart resume");
     for (std::size_t __j{}; __j < __share; ++__j) {
         __schd.__receiver_[__i + __j]->_M_notify_resume_sync();
     }
+    std::println(
+        "all resumed {}", __schd.__size_.load(std::memory_order_relaxed));
     __i += __share;
     __phase("phase 3", __i); // ceil(16/3) waves     -> ~ 6.00s
+    std::println("restart resume");
     for (std::size_t __j{}; __j < __share; ++__j) {
         __schd.__receiver_[__i + __j]->_M_notify_resume_sync();
     }
+    std::println(
+        "all resumed {}", __schd.__size_.load(std::memory_order_relaxed));
     __i += __share;
     __phase("phase 4", __i); // 16 / 4               -> ~ 4.00s
 }

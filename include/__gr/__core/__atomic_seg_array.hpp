@@ -1,20 +1,22 @@
 #pragma once
 
 #include <__algorithm/min.h>
+#include <__bit/bit_width.h>
 #include <atomic>
 
 namespace __gr::__core__::inline __v1 {
 
-template <typename _Ty> struct __atomic_seg_array { // NOLINT
+template <typename _Ty, std::size_t __max_size_>
+struct __atomic_seg_array { // NOLINT
     using __atomic                         = std::atomic<_Ty>;
-    static constexpr unsigned _S_n_segment = 24;
+    static constexpr unsigned _S_n_segment = std::bit_width(__max_size_);
 
     std::atomic<__atomic *> __segment_[_S_n_segment]{};
     std::atomic_size_t      __size_{0U};
 
     ~__atomic_seg_array() noexcept {
-        for (auto *__p : __segment_) {
-            delete[] __p->load(std::memory_order_acquire);
+        for (auto &__p : __segment_) {
+            delete[] __p.load(std::memory_order_acquire);
         }
     }
 
@@ -27,7 +29,7 @@ template <typename _Ty> struct __atomic_seg_array { // NOLINT
     inline static constexpr auto _S_locate(const unsigned __i) noexcept
         -> __locate_result {
         const unsigned __seg = 63U - __builtin_clzll(__i + 1U);
-        return {__seg, __i - ((1ULL << __seg) - 1U)};
+        return {__seg, __i - ((1U << __seg) - 1U)};
     }
 
     [[__nodiscard__]] auto _M_segment(const unsigned __seg) noexcept
