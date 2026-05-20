@@ -61,7 +61,7 @@ struct __atomic_seg_array { // NOLINT
         return __size_.load(std::memory_order_acquire);
     }
 
-    template <typename _Fn> void _M_ro_iter(_Fn &&__fn) const noexcept {
+    template <typename _Fn> void _M_iter_ro_forward(_Fn &&__fn) const noexcept {
         const std::size_t __n   = _M_size();
         unsigned          __it  = 0;
         unsigned          __seg = 0;
@@ -70,6 +70,11 @@ struct __atomic_seg_array { // NOLINT
             __atomic *__p = __segment_[__seg].load(std::memory_order_acquire);
             const std::size_t __m = 1U << __seg;
             const std::size_t __u = std::min(__m, __n - __it);
+            if (__p == nullptr) [[__unlikely__]] {
+                __it += __m;
+                ++__seg;
+                continue;
+            }
             for (std::size_t __idx{}; __idx < __u; ++__idx) {
                 // NOLINTNEXTLINE
                 const _Ty __v = __p[__idx].load(std::memory_order_acquire);

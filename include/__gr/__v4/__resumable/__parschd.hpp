@@ -97,7 +97,7 @@ struct __remote_queue_sink { // NOLINT
     __core__::__atomic_seg_array<__remote_queue *, _Gr_max_n_concurrency>
         __queue_;
     ~__remote_queue_sink() noexcept {
-        __queue_._M_ro_iter(
+        __queue_._M_iter_ro_forward(
             [] [[__gnu__::__always_inline__]] (__remote_queue * __p) //
             noexcept -> bool {
                 delete __p;
@@ -108,7 +108,7 @@ struct __remote_queue_sink { // NOLINT
     _M_pop_all_reversed(const std::size_t __tid) const noexcept
         -> STDEXEC::__intrusive_queue<&__task_base::__next_> {
         STDEXEC::__intrusive_queue<&__task_base::__next_> __task{};
-        __queue_._M_ro_iter(
+        __queue_._M_iter_ro_forward(
             [&__task, __tid]                                      //
             [[__gnu__::__always_inline__]] (__remote_queue * __p) //
             noexcept -> bool {
@@ -122,13 +122,14 @@ struct __remote_queue_sink { // NOLINT
         -> __remote_queue * {
         thread_local std::thread::id _S_tid   = std::this_thread::get_id();
         __remote_queue              *__needle = nullptr;
-        __queue_._M_ro_iter([&__needle](__remote_queue *__p) noexcept -> bool {
-            if (__p->__id_ == _S_tid) [[__unlikely__]] {
-                __needle = __p;
-                return true;
-            }
-            return false;
-        });
+        __queue_._M_iter_ro_forward(
+            [&__needle](__remote_queue *__p) noexcept -> bool {
+                if (__p->__id_ == _S_tid) [[__unlikely__]] {
+                    __needle = __p;
+                    return true;
+                }
+                return false;
+            });
         if (__needle != nullptr) { return __needle; }
         auto *__result = ::new (std::nothrow) __remote_queue{__n};
         __queue_._M_push_back(__result);
@@ -436,7 +437,7 @@ struct __parschd { // NOLINT
     _M_rcu_can_progress(const std::uint64_t __ep) const noexcept -> bool {
         _S_syscall_memory_barrier(MEMBARRIER_CMD_GLOBAL);
         bool __ok = true;
-        __remote_.__queue_._M_ro_iter(
+        __remote_.__queue_._M_iter_ro_forward(
             [__ep, &__ok]                                         //
             [[__gnu__::__always_inline__]] (__remote_queue * __p) //
             noexcept -> bool {
