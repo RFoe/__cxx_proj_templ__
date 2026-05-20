@@ -75,10 +75,7 @@ auto main() -> int {
         std::println("--- {} done in {:.4f}s ---\n", __name, __dt);
     };
     std::println("start retired");
-    for (std::size_t __i{}; __i < __n; ++__i) {
-        __schd.__receiver_[__i]->_M_notify_retire_sync();
-    }
-    std::println("all retired");
+    for () std::println("all retired");
     std::size_t __i{};
     std::println("restart resume");
     for (std::size_t __j{}; __j < __share; ++__j) {

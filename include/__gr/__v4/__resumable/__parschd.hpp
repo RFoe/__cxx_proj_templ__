@@ -1,5 +1,7 @@
 #pragma once
-
+#ifndef _GNU_SOURCE
+    #define _GNU_SOURCE
+#endif
 #include <exec/detail/atomic_intrusive_queue.hpp>
 #include <exec/detail/bwos_lifo_queue.hpp>
 #include <exec/detail/xorshift.hpp>
@@ -339,6 +341,46 @@ struct __parschd { // NOLINT
         const unsigned __n = std::thread::hardware_concurrency();
         return __n == 0 ? 1 : __n;
     }
+    struct __indir {
+        std::vector<std::atomic<std::uint32_t>> __map_;
+        std::vector<std::uint32_t>              __offset_;
+        std::atomic<std::uint32_t>              __size_;
+
+        explicit __indir(const std::uint32_t __n) noexcept
+            : __map_(__n), __offset_(__n), __size_(0U) {}
+
+        [[__gnu__::__always_inline__, __gnu__::__artificial__]]
+        inline void _M_push_back(const std::uint32_t __idx) noexcept {
+            const std::uint32_t __k = __size_.load(std::memory_order_relaxed);
+            __map_[__k].store(__idx, std::memory_order_relaxed);
+            __offset_[__idx] = __k;
+            __size_.store(__k + 1U, std::memory_order_relaxed);
+            _TSAN_RELEASE(&__size_);
+        }
+
+        [[__gnu__::__always_inline__, __gnu__::__artificial__]]
+        inline void _M_remove(const std::uint32_t __idx) noexcept {
+            const std::uint32_t __j = __offset_[__idx];
+            const std::uint32_t __last =
+                __size_.load(std::memory_order_relaxed) - 1U;
+            const std::uint32_t __w =
+                __map_[__last].load(std::memory_order_relaxed);
+
+            __map_[__j].store(__w, std::memory_order_relaxed);
+            __offset_[__w] = __j;
+
+            __map_[__last].store(__idx, std::memory_order_relaxed);
+            __offset_[__idx] = __last;
+
+            __size_.store(__last, std::memory_order_relaxed);
+            _TSAN_RELEASE(&__size_);
+        }
+
+        [[__gnu__::__always_inline__, __gnu__::__artificial__, __nodiscard__]]
+        inline auto _M_size() const noexcept -> std::uint32_t {
+            return __size_.load(std::memory_order_relaxed);
+        }
+    };
 
     inline static std::atomic_uint64_t _S_n{0U};
 
@@ -352,10 +394,8 @@ struct __parschd { // NOLINT
     std::uint32_t                                            __n_thread_;
     std::vector<std::thread>                                 __thread_;
     std::vector<STDEXEC::__manual_lifetime<__task_receiver>> __receiver_;
-    alignas(__GCC_DESTRUCTIVE_SIZE)
-        std::vector<std::atomic<std::uint32_t>> __access_;
-    std::vector<std::uint32_t> __offset_;
-    alignas(__GCC_DESTRUCTIVE_SIZE) std::atomic<std::uint32_t> __size_;
+    alignas(__GCC_DESTRUCTIVE_SIZE) __indir __access_;
+    alignas(__GCC_DESTRUCTIVE_SIZE) __indir __retire_;
     mutable std::mutex __modify_mut_;
 
     [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
@@ -444,15 +484,16 @@ struct __parschd { // NOLINT
             std::uint64_t(std::random_device{}());
         ++__start;
         _M_rcu_lock(*__queue);
-        _TSAN_ACQUIRE(&__size_);
-        const std::uint32_t __k = __size_.load(std::memory_order_relaxed);
+        _TSAN_ACQUIRE(&__access_.__size_);
+        const std::uint32_t __k =
+            __access_.__size_.load(std::memory_order_relaxed);
         if (__k == 0) [[__unlikely__]] {
             _M_rcu_unlock(*__queue);
             return false;
         }
         __asm__ __volatile__("" ::: "memory");           // NOLINT
         const std::uint32_t __target =
-            __access_[__start % __k].load(std::memory_order_relaxed);
+            __access_.__map_[__start % __k].load(std::memory_order_relaxed);
         __queue->__queues_[__target].push_front(__task); // NOLINT
         __receiver_[__target]->_M_notify_retry();
         _M_rcu_unlock(*__queue);
@@ -467,8 +508,7 @@ struct __parschd { // NOLINT
     }
     explicit __parschd(
         const std::uint32_t __n = _S_hardware_concurrency()) noexcept // NOLINT
-        : __n_thread_(__n), __receiver_(__n), __access_(__n), __offset_(__n),
-          __size_(__n) {
+        : __n_thread_(__n), __receiver_(__n), __access_(__n), __retire_(__n) {
 #if _NDEBUG
         const long __r = _S_syscall_memory_barrier(MEMBARRIER_CMD_QUERY);
         // NOLINTNEXTLINE
@@ -476,8 +516,7 @@ struct __parschd { // NOLINT
 #endif
         for (std::uint32_t __i{}; __i < __n; ++__i) {
             __receiver_[__i].__construct(this, __i);
-            __offset_[__i] = __i;
-            __access_[__i].store(__i, std::memory_order_relaxed);
+            __access_._M_push_back(__i);
         }
         __thread_.reserve(__n);
         __active_.store(__n << 16U, std::memory_order_relaxed);
@@ -488,6 +527,105 @@ struct __parschd { // NOLINT
             });
         }
     }
+
+    auto _M_request_retire_n(std::uint32_t __n) noexcept -> std::uint32_t {
+        __remote_queue *__queue = _M_get_remote_queue();
+        _M_rcu_lock(*__queue);
+        _TSAN_ACQUIRE(&__access_.__size_);
+        const std::uint32_t __k =
+            __access_.__size_.load(std::memory_order_relaxed);
+        __n = std::min(__n, __k);
+        for (std::uint32_t __i = 0; __i < __n; ++__i) {
+            const std::uint32_t __idx = __access_.__map_[__k - 1U - __i].load(
+                std::memory_order_relaxed);
+            __receiver_[__idx]->_M_notify_retire();
+        }
+        _M_rcu_unlock(*__queue);
+        return __n;
+    }
+
+    auto _M_request_resume_n(std::uint32_t __n) noexcept -> std::uint32_t {
+        __remote_queue *__queue = _M_get_remote_queue();
+        _M_rcu_lock(*__queue);
+        _TSAN_ACQUIRE(&__retire_.__size_);
+        const std::uint32_t __k =
+            __retire_.__size_.load(std::memory_order_relaxed);
+        __n = std::min(__n, __k);
+        for (std::uint32_t __i = 0; __i < __n; ++__i) {
+            const std::uint32_t __idx = __retire_.__map_[__k - 1U - __i].load(
+                std::memory_order_relaxed);
+            __receiver_[__idx]->_M_notify_resume();
+        }
+        _M_rcu_unlock(*__queue);
+        return __n;
+    }
+
+    auto _M_request_retire_n_sync(std::uint32_t __n) noexcept -> std::uint32_t {
+        std::uint32_t __targets[_Gr_max_n_concurrency];
+
+        __remote_queue *__queue = _M_get_remote_queue();
+        _M_rcu_lock(*__queue);
+        _TSAN_ACQUIRE(&__access_.__size_);
+        const std::uint32_t __k =
+            __access_.__size_.load(std::memory_order_relaxed);
+        __n = std::min(__n, __k);
+        for (std::uint32_t __i = 0; __i < __n; ++__i) {
+            const std::uint32_t __idx = __access_.__map_[__k - 1U - __i].load(
+                std::memory_order_relaxed);
+            __targets[__i] = __idx; // NOLINT
+            __receiver_[__idx]->_M_notify_retire();
+        }
+        _M_rcu_unlock(*__queue);
+
+        for (std::uint32_t __i = 0; __i < __n; ++__i) {
+            // NOLINTNEXTLINE
+            __task_receiver &__rcvr = __receiver_[__targets[__i]].__get();
+            while (__rcvr.__mask_.load(std::memory_order_relaxed).__stage_ !=
+                   __task_receiver::__exec_stage::_S_suspend) {
+#if defined(__x86_64__) || defined(__i386__)
+                __builtin_ia32_pause();
+#else
+                std::this_thread::yield();
+#endif
+            }
+            { std::lock_guard __l{__rcvr.__mut_}; }
+        }
+        return __n;
+    }
+
+    auto _M_request_resume_n_sync(std::uint32_t __n) noexcept -> std::uint32_t {
+        std::uint32_t __targets[_Gr_max_n_concurrency];
+
+        __remote_queue *__queue = _M_get_remote_queue();
+        _M_rcu_lock(*__queue);
+        _TSAN_ACQUIRE(&__retire_.__size_);
+        const std::uint32_t __k =
+            __retire_.__size_.load(std::memory_order_relaxed);
+        __n = std::min(__n, __k);
+        for (std::uint32_t __i = 0; __i < __n; ++__i) {
+            const std::uint32_t __idx = __retire_.__map_[__k - 1U - __i].load(
+                std::memory_order_relaxed);
+            __targets[__i] = __idx; // NOLINT
+            __receiver_[__idx]->_M_notify_resume();
+        }
+        _M_rcu_unlock(*__queue);
+
+        for (std::uint32_t __i = 0; __i < __n; ++__i) {
+            // NOLINTNEXTLINE
+            __task_receiver &__rcvr = __receiver_[__targets[__i]].__get();
+            { std::lock_guard __l{__rcvr.__mut_}; }
+            while (__rcvr.__mask_.load(std::memory_order_relaxed).__message_ ==
+                   __task_receiver::__message::_S_resume) {
+#if defined(__x86_64__) || defined(__i386__)
+                __builtin_ia32_pause();
+#else
+                std::this_thread::yield();
+#endif
+            }
+        }
+        return __n;
+    }
+
     ~__parschd() noexcept {
         _M_request_stop();
         _M_join();
@@ -521,16 +659,17 @@ inline void _S_move_pending_to_local(
 [[__nodiscard__]] inline auto __task_receiver::_M_try_steal() -> __pop_result {
     __remote_queue *__queue = __pool_->_M_get_remote_queue();
     __pool_->_M_rcu_lock(*__queue);
-    _TSAN_ACQUIRE(&__pool_->__size_);
-    const std::uint32_t __k = __pool_->__size_.load(std::memory_order_relaxed);
+    _TSAN_ACQUIRE(&__pool_->__access_.__size_);
+    const std::uint32_t __k =
+        __pool_->__access_.__size_.load(std::memory_order_relaxed);
     if (__k < 2) [[__unlikely__]] {
         __pool_->_M_rcu_unlock(*__queue);
         return {.__task_ = nullptr};
     }
     std::uniform_int_distribution<std::uint32_t> __d(0, __k - 1);
     for (unsigned __cnt{}; __cnt < __k - 1;) {
-        const std::uint32_t __idx =
-            __pool_->__access_[__d(__rng_)].load(std::memory_order_relaxed);
+        const std::uint32_t __idx = __pool_->__access_.__map_[__d(__rng_)].load(
+            std::memory_order_relaxed);
         if (__idx == __index_) [[__unlikely__]] { continue; }
         if (__task_base *__task =
                 __pool_->__receiver_[__idx]->__local_.steal_front()) {
@@ -545,8 +684,9 @@ inline void _S_move_pending_to_local(
 inline void __task_receiver::_M_notify_one_sleep() noexcept {
     __remote_queue *__queue = __pool_->_M_get_remote_queue();
     __pool_->_M_rcu_lock(*__queue);
-    _TSAN_ACQUIRE(&__pool_->__size_);
-    const std::uint32_t __k = __pool_->__size_.load(std::memory_order_relaxed);
+    _TSAN_ACQUIRE(&__pool_->__access_.__size_);
+    const std::uint32_t __k =
+        __pool_->__access_.__size_.load(std::memory_order_relaxed);
     if (__k < 2) [[__unlikely__]] {
         __pool_->_M_rcu_unlock(*__queue);
         return;
@@ -556,7 +696,7 @@ inline void __task_receiver::_M_notify_one_sleep() noexcept {
     const std::uint32_t                          __begin = __d(__rng_);
     for (std::uint32_t __i{}; __i < __k; ++__i) {
         const std::uint32_t __idx =
-            __pool_->__access_[(__begin + __i) % __k].load(
+            __pool_->__access_.__map_[(__begin + __i) % __k].load(
                 std::memory_order_relaxed);
         if (__idx == __index_) [[__unlikely__]] { continue; }
         if (__pool_->__receiver_[__idx]->_M_try_notify_retry_sleep()) {
@@ -651,22 +791,8 @@ inline void __task_receiver::_M_clear_sleep() noexcept {
 
 inline void __task_receiver::_M_retire_and_resume() noexcept {
     {
-        std::lock_guard __lock{__pool_->__modify_mut_};
-
-        const std::uint32_t __j = __pool_->__offset_[__index_];
-        const std::uint32_t __last =
-            __pool_->__size_.load(std::memory_order_relaxed) - 1U;
-        const std::uint32_t __w =
-            __pool_->__access_[__last].load(std::memory_order_relaxed);
-
-        __pool_->__access_[__j].store(__w, std::memory_order_relaxed);
-        __pool_->__offset_[__w] = __j;
-
-        __pool_->__access_[__last].store(__index_, std::memory_order_relaxed);
-        __pool_->__offset_[__index_] = __last;
-
-        __pool_->__size_.store(__last, std::memory_order_relaxed);
-        _TSAN_RELEASE(&__pool_->__size_);
+        __pool_->__access_._M_remove(__index_);
+        __pool_->__retire_._M_push_back(__index_);
     }
     __pool_->_M_rcu_synchronize();
 
@@ -683,16 +809,17 @@ inline void __task_receiver::_M_retire_and_resume() noexcept {
         __remote_queue *__queue = __pool_->_M_get_remote_queue();
 
         __pool_->_M_rcu_lock(*__queue);
-        _TSAN_ACQUIRE(&__pool_->__size_);
+        _TSAN_ACQUIRE(&__pool_->__access_.__size_);
         const std::uint32_t __k =
-            __pool_->__size_.load(std::memory_order_relaxed);
+            __pool_->__access_.__size_.load(std::memory_order_relaxed);
         if (__k == 0) [[__unlikely__]] {
             __pool_->_M_rcu_unlock(*__queue);
             __pending_.prepend(std::move(__tmp));
         } else {
             std::uniform_int_distribution<std::uint32_t> __d(0, __k - 1);
             const std::uint32_t                          __idx =
-                __pool_->__access_[__d(__rng_)].load(std::memory_order_relaxed);
+                __pool_->__access_.__map_[__d(__rng_)].load(
+                    std::memory_order_relaxed);
             __queue->__queues_[__idx].prepend(std::move(__tmp)); // NOLINT
             __pool_->__receiver_[__idx]->_M_notify_retry();
             __pool_->_M_rcu_unlock(*__queue);
@@ -712,15 +839,9 @@ inline void __task_receiver::_M_retire_and_resume() noexcept {
 
     if (_M_stop_requested()) { return; }
     {
-        std::lock_guard     __lock{__pool_->__modify_mut_};
-        const std::uint32_t __k =
-            __pool_->__size_.load(std::memory_order_relaxed);
-
-        __pool_->__access_[__k].store(__index_, std::memory_order_relaxed);
-        __pool_->__offset_[__index_] = __k;
-
-        __pool_->__size_.store(__k + 1U, std::memory_order_relaxed);
-        _TSAN_RELEASE(&__pool_->__size_);
+        std::lock_guard __lock{__pool_->__modify_mut_};
+        __pool_->__retire_._M_remove(__index_);
+        __pool_->__access_._M_push_back(__index_);
         _S_syscall_memory_barrier(MEMBARRIER_CMD_GLOBAL);
     }
     _M_consume(__message::_S_resume);
