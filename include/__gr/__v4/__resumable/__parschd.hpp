@@ -38,7 +38,7 @@ void __tsan_release(void *__addr);
     #define _GR_max_n_parschd_obj 8
 #endif
 #ifndef _Gr_max_n_concurrency
-    #define _Gr_max_n_concurrency 512
+    #define _Gr_max_n_concurrency 64
 #endif
 
 namespace __gr::__resumable__::inline __v4 {
@@ -57,18 +57,18 @@ template <std::default_initializable _Ty, std::size_t _Np> struct __vector {
 };
 
 [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-inline auto _S_syscall_memory_barrier(const int __cmd) noexcept -> long {
+inline auto _S_cmd_memory_barrier(const int __cmd) noexcept -> long {
     return ::syscall(__NR_membarrier, __cmd, 0, 0);     // NOLINT
 }
 [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-inline auto _S_syscall_futex_wait_private(void *__addr, const int __x) noexcept
+inline auto _S_futex_wait_private(void *__addr, const int __x) noexcept
     -> long {
     // NOLINTNEXTLINE
     return ::syscall(
         __NR_futex, __addr, FUTEX_WAIT_PRIVATE, __x, nullptr, nullptr, 0);
 }
 [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-inline auto _S_syscall_futex_wake_private(void *__addr, const int __x) noexcept
+inline auto _S_futex_wake_private(void *__addr, const int __x) noexcept
     -> long {
     // NOLINTNEXTLINE
     return ::syscall(
@@ -99,10 +99,7 @@ struct __remote_queue_sink { // NOLINT
     ~__remote_queue_sink() noexcept {
         __queue_._M_iter_ro_forward(
             [] [[__gnu__::__always_inline__]] (__remote_queue * __p) //
-            noexcept -> bool {
-                delete __p;
-                return false;
-            });
+            noexcept -> void { delete __p; });
     }
     [[__nodiscard__]] auto
     _M_pop_all_reversed(const std::size_t __tid) const noexcept
@@ -111,9 +108,8 @@ struct __remote_queue_sink { // NOLINT
         __queue_._M_iter_ro_forward(
             [&__task, __tid]                                      //
             [[__gnu__::__always_inline__]] (__remote_queue * __p) //
-            noexcept -> bool {
+            noexcept -> void {
                 __task.append(__p->__queues_[__tid].pop_all_reversed());
-                return false;
             });
         return __task;
     }
@@ -342,12 +338,12 @@ struct __parschd { // NOLINT
         const unsigned __n = std::thread::hardware_concurrency();
         return __n == 0 ? 1 : __n;
     }
-    struct __indir {
+    struct __rcu_table {
         std::vector<std::atomic<std::uint32_t>> __map_;
         std::vector<std::uint32_t>              __offset_;
         std::atomic<std::uint32_t>              __size_;
 
-        explicit __indir(const std::uint32_t __n) noexcept
+        explicit __rcu_table(const std::uint32_t __n) noexcept
             : __map_(__n), __offset_(__n), __size_(0U) {}
 
         [[__gnu__::__always_inline__, __gnu__::__artificial__]]
@@ -362,24 +358,19 @@ struct __parschd { // NOLINT
         [[__gnu__::__always_inline__, __gnu__::__artificial__]]
         inline void _M_remove(const std::uint32_t __idx) noexcept {
             const std::uint32_t __j = __offset_[__idx];
-            const std::uint32_t __last =
+            const std::uint32_t __m =
                 __size_.load(std::memory_order_relaxed) - 1U;
             const std::uint32_t __w =
-                __map_[__last].load(std::memory_order_relaxed);
+                __map_[__m].load(std::memory_order_relaxed);
 
             __map_[__j].store(__w, std::memory_order_relaxed);
             __offset_[__w] = __j;
 
-            __map_[__last].store(__idx, std::memory_order_relaxed);
-            __offset_[__idx] = __last;
+            __map_[__m].store(__idx, std::memory_order_relaxed);
+            __offset_[__idx] = __m;
 
-            __size_.store(__last, std::memory_order_relaxed);
+            __size_.store(__m, std::memory_order_relaxed);
             _TSAN_RELEASE(&__size_);
-        }
-
-        [[__gnu__::__always_inline__, __gnu__::__artificial__, __nodiscard__]]
-        inline auto _M_size() const noexcept -> std::uint32_t {
-            return __size_.load(std::memory_order_relaxed);
         }
     };
 
@@ -395,8 +386,8 @@ struct __parschd { // NOLINT
     std::uint32_t                                            __n_thread_;
     std::vector<std::thread>                                 __thread_;
     std::vector<STDEXEC::__manual_lifetime<__task_receiver>> __receiver_;
-    alignas(__GCC_DESTRUCTIVE_SIZE) __indir __access_;
-    alignas(__GCC_DESTRUCTIVE_SIZE) __indir __retire_;
+    alignas(__GCC_DESTRUCTIVE_SIZE) __rcu_table __access_;
+    alignas(__GCC_DESTRUCTIVE_SIZE) __rcu_table __retire_;
     mutable std::mutex __modify_mut_;
 
     [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
@@ -430,12 +421,12 @@ struct __parschd { // NOLINT
         __asm__ __volatile__("" ::: "memory"); // NOLINT
         if ((bool)__wait_.load(std::memory_order_acquire)) {
             __wait_.store(0, std::memory_order_release);
-            _S_syscall_futex_wake_private(&__wait_, 0);
+            _S_futex_wake_private(&__wait_, 0);
         }
     }
     [[__nodiscard__]] auto
     _M_rcu_can_progress(const std::uint64_t __ep) const noexcept -> bool {
-        _S_syscall_memory_barrier(MEMBARRIER_CMD_GLOBAL);
+        _S_cmd_memory_barrier(MEMBARRIER_CMD_GLOBAL);
         bool __ok = true;
         __remote_.__queue_._M_iter_ro_forward(
             [__ep, &__ok]                                         //
@@ -458,18 +449,17 @@ struct __parschd { // NOLINT
         if (_M_rcu_can_progress(__ep)) { return; }
         while (true) {
             __wait_.store(1, std::memory_order_release);
-            _S_syscall_memory_barrier(MEMBARRIER_CMD_GLOBAL);
+            _S_cmd_memory_barrier(MEMBARRIER_CMD_GLOBAL);
             if (_M_rcu_can_progress(__ep)) [[__unlikely__]] { break; }
-            _S_syscall_futex_wait_private(&__wait_, 1);
+            _S_futex_wait_private(&__wait_, 1);
         }
+        __wait_.store(0, std::memory_order_relaxed);
     }
 
     void _M_request_stop() noexcept {
         for (auto &__rcvr : __receiver_) { __rcvr->_M_notify_stop(); }
     }
-    // void _M_request_resume() noexcept {
-    //     for (auto &__q : __queue_) { __q->_M_request_resume(); }
-    // }
+
     void _M_join() noexcept {
         for (std::thread &__t : __thread_) { __t.join(); }
     }
@@ -511,7 +501,7 @@ struct __parschd { // NOLINT
         const std::uint32_t __n = _S_hardware_concurrency()) noexcept // NOLINT
         : __n_thread_(__n), __receiver_(__n), __access_(__n), __retire_(__n) {
 #if _NDEBUG
-        const long __r = _S_syscall_memory_barrier(MEMBARRIER_CMD_QUERY);
+        const long __r = _S_memory_barrier(MEMBARRIER_CMD_QUERY);
         // NOLINTNEXTLINE
         assert(__r > 0 && (__r & MEMBARRIER_CMD_GLOBAL));
 #endif
@@ -843,7 +833,7 @@ inline void __task_receiver::_M_retire_and_resume() noexcept {
         std::lock_guard __lock{__pool_->__modify_mut_};
         __pool_->__retire_._M_remove(__index_);
         __pool_->__access_._M_push_back(__index_);
-        _S_syscall_memory_barrier(MEMBARRIER_CMD_GLOBAL);
+        _S_cmd_memory_barrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED);
     }
     _M_consume(__message::_S_resume);
 }

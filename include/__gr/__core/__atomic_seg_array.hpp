@@ -49,19 +49,19 @@ struct __atomic_seg_array { // NOLINT
     }
 
     auto _M_push_back(_Ty __v) noexcept -> std::size_t {
-        const std::size_t __i =
+        const std::size_t __pos =
             __size_.fetch_add(1U, std::memory_order_relaxed);
-        const auto [__seg, __idx] = _S_locate(__i);
+        const auto [__seg, __idx] = _S_locate(__pos);
         __atomic *__p             = _M_segment(__seg);
         __p[__idx].store(__v, std::memory_order_release);
-        return __i;
+        return __pos;
     }
 
     [[__nodiscard__]] auto _M_size() const noexcept -> std::size_t {
         return __size_.load(std::memory_order_acquire);
     }
 
-    template <typename _Fn> void _M_iter_ro_forward(_Fn &&__fn) const noexcept {
+    template <typename _Fn> void _M_iter_ro_forward(_Fn __fn) const noexcept {
         const std::size_t __n   = _M_size();
         unsigned          __it  = 0;
         unsigned          __seg = 0;
@@ -75,11 +75,16 @@ struct __atomic_seg_array { // NOLINT
                 ++__seg;
                 continue;
             }
+#pragma unroll 4
             for (std::size_t __idx{}; __idx < __u; ++__idx) {
                 // NOLINTNEXTLINE
                 const _Ty __v = __p[__idx].load(std::memory_order_acquire);
                 if (__v == _Ty{}) [[__unlikely__]] { continue; }
-                if (__fn(__v)) [[__unlikely__]] { return; }
+                if constexpr (std::is_invocable_r_v<bool, _Fn &, _Ty>) {
+                    if (__fn(__v)) [[__unlikely__]] { return; }
+                } else {
+                    __fn(__v);
+                }
             }
             __it += __u;
             ++__seg;
